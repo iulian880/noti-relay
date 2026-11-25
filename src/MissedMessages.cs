@@ -123,8 +123,9 @@ public static class MissedMessages
         Title: "Unsent notifications",
         Question: Question,
         Details: details,
-        Note: "Nothing is sent until you answer. No deletes these for good; " +
-              "new messages are relayed from now on either way.",
+        Note: "Nothing is sent until you answer. No deletes these for good, along with " +
+              "older Teams messages OneDrive is still syncing; new messages are relayed " +
+              "from now on either way.",
         YesText: "Yes, send them",
         NoText: "No, start from now");
 
@@ -135,6 +136,26 @@ public static class MissedMessages
         Note: "No deletes them for good. New messages are sent as usual afterwards.",
         YesText: "Yes, send them",
         NoText: "No, discard them");
+
+    /// <summary>
+    /// Asked when old Teams messages show up after launch (OneDrive still syncing, monitoring
+    /// started by hand, or the PC woke up) and the launch question did not cover them.
+    /// </summary>
+    public static PromptText OlderTeamsPrompt(string details) => new(
+        Title: "Older Teams messages",
+        Question: "Do you want me to send these older Teams messages?",
+        Details: details,
+        Note: "They were written before Teams monitoring started or while the PC slept, and " +
+              "reached the inbox folder only now. Nothing is sent until you answer. " +
+              "No skips them for good; new messages are relayed either way.",
+        YesText: "Yes, send them",
+        NoText: "No, skip them");
+
+    // The inbox worker pauses 2 s between scans; a much longer pause means the PC slept.
+    private static readonly TimeSpan SleepGap = TimeSpan.FromMinutes(2);
+
+    public static bool SleptBetween(DateTimeOffset beforeUtc, DateTimeOffset afterUtc) =>
+        afterUtc - beforeUtc >= SleepGap;
 
     public static string Title(string title)
     {

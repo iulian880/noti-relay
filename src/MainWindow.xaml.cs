@@ -79,7 +79,13 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _heartbeatTimer;
 
     private readonly List<MissedOutlookToast> _missedOutlook = new();
-    private IReadOnlyList<MissedTeamsMessage> _launchMissedTeams = Array.Empty<MissedTeamsMessage>();
+
+    // Older Teams messages that show up after launch are asked about once the inbox has
+    // been quiet for a few seconds, so a OneDrive sync burst gives one question, not many.
+    private readonly DispatcherTimer _olderTeamsTimer;
+
+    // One warning prompt at a time (launch question, Resume sending, older Teams messages).
+    private bool _promptOpen;
 
     private sealed record MissedOutlookToast(string Text, DateTimeOffset CreatedAt, string QueueId);
 
@@ -138,7 +144,15 @@ public partial class MainWindow : Window
         _teamsInboxWatcher = new TeamsInboxWatcher(
             _deliveryQueue,
             () => _settings.GetTopicFor(NotificationCategory.Teams),
-            LogFromWorker);
+            LogFromWorker,
+            OnOlderTeamsHeld);
+
+        _olderTeamsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        _olderTeamsTimer.Tick += (_, _) =>
+        {
+            _olderTeamsTimer.Stop();
+            AskAboutOlderTeams();
+        };
 
         InitCategoryTopicRows();
         RefreshTopicState();
@@ -274,8 +288,11 @@ public partial class MainWindow : Window
     {
         try
         {
+            // Read now, not when monitoring started: also covers files read in the meantime.
+            IReadOnlyList<MissedTeamsMessage> heldTeams = _teamsInboxWatcher.UndecidedHeld();
+
             int queuedCount = backlog.Ids.Count;
-            int teamsCount = _launchMissedTeams.Count;
+            int teamsCount = heldTeams.Count;
             int outlookCount = _missedOutlook.Count;
 
             if (queuedCount + teamsCount + outlookCount == 0 || _isShuttingDown)
@@ -285,7 +302,7 @@ public partial class MainWindow : Window
                 ? new DateTimeOffset(DateTime.SpecifyKind(created, DateTimeKind.Utc))
                 : null;
 
-            DateTimeOffset? oldest = _launchMissedTeams
+            DateTimeOffset? oldest = heldTeams
                 .Select(missed => (DateTimeOffset?)missed.SortTimeUtc)
                 .Concat(_missedOutlook.Select(toast => (DateTimeOffset?)toast.CreatedAt))
                 .Append(queuedOldest)
@@ -300,16 +317,15 @@ public partial class MainWindow : Window
 
             AddLog("Not sent yet: " + details + ". Nothing is sent until you answer.");
 
-            bool send = MissedMessagesDialog.Ask(MissedMessages.LaunchPrompt(details));
+            bool send = AskPrompt(MissedMessages.LaunchPrompt(details));
 
             // Closed by Exit or by Windows shutting down: not an answer, keep everything.
             if (_isShuttingDown || _sessionEnding)
                 return;
 
-            if (teamsCount > 0)
-                _teamsInboxWatcher.ResolveHeld(send);
-
-            _launchMissedTeams = Array.Empty<MissedTeamsMessage>();
+            // No also covers older Teams messages OneDrive syncs later in this run;
+            // Yes covers only those listed, later ones get their own question.
+            _teamsInboxWatcher.ResolveHeld(send, heldTeams.Select(missed => missed.Key));
 
             await ResolveMissedOutlookAsync(send);
 
@@ -331,7 +347,96 @@ public partial class MainWindow : Window
             {
                 _sendingGate.Release(SendingHold.LaunchQuestion);
                 UpdateSendingControls();
+
+                // Held while the launch question was open, or after a Yes that did not list them.
+                if (_teamsInboxWatcher.UndecidedHeld().Count > 0)
+                    ScheduleOlderTeamsQuestion();
             }
+        }
+    }
+
+    // Worker thread: older Teams messages were held after monitoring started.
+    private void OnOlderTeamsHeld()
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            return;
+
+        Dispatcher.BeginInvoke(new Action(ScheduleOlderTeamsQuestion));
+    }
+
+    private void ScheduleOlderTeamsQuestion()
+    {
+        if (_isShuttingDown)
+            return;
+
+        // Restarted on every new batch: asked once the inbox has been quiet for a moment.
+        _olderTeamsTimer.Stop();
+        _olderTeamsTimer.Start();
+    }
+
+    // Older Teams messages that the launch question did not cover (OneDrive synced them
+    // later, monitoring was started by hand, or the PC woke up). They stay out of the
+    // queue until the user answers, so nothing else waits for this question.
+    private void AskAboutOlderTeams()
+    {
+        if (_isShuttingDown || _sessionEnding)
+            return;
+
+        // Another question is open or the launch question is still to come: ask afterwards.
+        if (_promptOpen || _sendingGate.IsHeld(SendingHold.LaunchQuestion))
+        {
+            ScheduleOlderTeamsQuestion();
+            return;
+        }
+
+        try
+        {
+            IReadOnlyList<MissedTeamsMessage> held = _teamsInboxWatcher.UndecidedHeld();
+
+            if (held.Count == 0)
+                return;
+
+            string details = MissedMessages.Describe(
+                0,
+                held.Count,
+                0,
+                held[0].SortTimeUtc.LocalDateTime,
+                DateTime.Now);
+
+            AddLog("Not sent yet: " + details + ". Nothing is sent until you answer.");
+
+            bool send = AskPrompt(MissedMessages.OlderTeamsPrompt(details));
+
+            // Closed by Exit or by Windows shutting down: not an answer, keep them held.
+            if (_isShuttingDown || _sessionEnding)
+                return;
+
+            _teamsInboxWatcher.ResolveHeld(send, held.Select(missed => missed.Key));
+
+            AddLog(send
+                ? "You chose to send the older Teams messages; they go out oldest first."
+                : "You chose to skip the older Teams messages; only new messages are relayed.");
+
+            if (_teamsInboxWatcher.UndecidedHeld().Count > 0)
+                ScheduleOlderTeamsQuestion();
+        }
+        catch (Exception ex)
+        {
+            AddLog("Could not ask about the older Teams messages: " + ex.Message, ex);
+        }
+    }
+
+    private bool AskPrompt(PromptText prompt)
+    {
+        _promptOpen = true;
+
+        try
+        {
+            return MissedMessagesDialog.Ask(prompt);
+        }
+        finally
+        {
+            _promptOpen = false;
         }
     }
 
@@ -729,7 +834,7 @@ public partial class MainWindow : Window
                     ? DateTime.SpecifyKind(created, DateTimeKind.Utc).ToLocalTime()
                     : null;
 
-                bool send = MissedMessagesDialog.Ask(MissedMessages.ResumePrompt(
+                bool send = AskPrompt(MissedMessages.ResumePrompt(
                     MissedMessages.DescribeWaiting(waiting.Ids.Count, oldestLocal, DateTime.Now)));
 
                 // Closed by Exit or by Windows shutting down: not an answer, stay stopped.
@@ -1443,7 +1548,6 @@ public partial class MainWindow : Window
         try
         {
             StartTeamsInboxMonitoring(automatic: true, held: missed);
-            _launchMissedTeams = missed;
         }
         catch (Exception ex)
         {

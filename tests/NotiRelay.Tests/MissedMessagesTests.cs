@@ -167,4 +167,26 @@ public class MissedMessagesTests
         Assert.Equal("Yes, send them", prompt.YesText);
         Assert.Equal("No, discard them", prompt.NoText);
     }
+
+    [Fact]
+    public void OlderTeamsPrompt_OffersSendOrSkip()
+    {
+        PromptText prompt = MissedMessages.OlderTeamsPrompt("136 Teams messages · oldest from Mon 09:12");
+
+        Assert.Equal("136 Teams messages · oldest from Mon 09:12", prompt.Details);
+        Assert.Equal("Yes, send them", prompt.YesText);
+        Assert.Equal("No, skip them", prompt.NoText);
+        Assert.Contains("Nothing is sent until you answer", prompt.Note);
+    }
+
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(119, false)]
+    [InlineData(120, true)]
+    [InlineData(8 * 3600, true)]
+    [InlineData(-600, false)]
+    public void SleptBetween_OnlyForAGapFarLongerThanTheScanPause(int seconds, bool expected)
+    {
+        Assert.Equal(expected, MissedMessages.SleptBetween(T0, T0.AddSeconds(seconds)));
+    }
 }

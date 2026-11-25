@@ -12,6 +12,7 @@
     <Compile Include="../../src/NtfyClient.cs" Link="Linked/NtfyClient.cs" />
     <Compile Include="../../src/NtfyTopic.cs" Link="Linked/NtfyTopic.cs" />
     <Compile Include="../../src/MissedMessages.cs" Link="Linked/MissedMessages.cs" />
+    <Compile Include="../../src/HeldTeamsMessages.cs" Link="Linked/HeldTeamsMessages.cs" />
     <Compile Include="../../src/NtfyErrors.cs" Link="Linked/NtfyErrors.cs" />
     <Compile Include="../../src/DeliveryOutage.cs" Link="Linked/DeliveryOutage.cs" />
     <Compile Include="../../src/DebugLogFile.cs" Link="Linked/DebugLogFile.cs" />
